@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <title>螢幕錄影工具</title>
+  <style>
+    body { font-family: sans-serif; max-width: 600px; margin: 2rem auto; padding: 1rem; }
+    button { padding: 8px 18px; margin-right: 8px; cursor: pointer; }
+    select { padding: 6px; margin-right: 12px; }
+    video { width: 100%; margin-top: 1rem; }
+    #log { background: #f5f5f5; padding: 10px; font-size: 12px; font-family: monospace; min-height: 60px; }
+  </style>
+</head>
+<body>
+<h2>🎥 螢幕錄影</h2>
+
+<div style="margin-bottom: 1rem;">
+  <!-- 解析度選擇 -->
+  <label>解析度：
+    <select id="resSelect">
+      <option value="720">720p (1280×720)</option>
+      <option value="1080" selected>1080p (1920×1080)</option>
+    </select>
+  </label>
+
+  <!-- 麥克風選擇 -->
+  <label>麥克風：
+    <select id="micSelect">
+      <option value="false">否</option>
+      <option value="true">是</option>
+    </select>
+  </label>
+</div>
+
+<div>
+  <button id="btnStart" onclick="startRec()">▶ 開始錄影</button>
+  <button id="btnStop"  onclick="stopRec()" disabled>⏹ 停止並下載</button>
+  <span id="timer" style="font-family:monospace; font-weight:bold;">00:00</span>
+</div>
+
+<div id="log">→ 準備就緒，按「開始錄影」</div>
+<video id="preview" controls></video>
+
+<script>
+  let mediaRecorder, chunks = [], stream;
+  let timerInterval, seconds = 0;
+
+  /* ── 產生檔案名稱：日期 + 兩位流水號 ── */
+  let dailyCounter = {};
+
+  function getFilename() {
+    const now = new Date();
+    const pad2 = n => String(n).padStart(2, '0');
+
+    // 格式：YYYYMMDD
+    const dateKey = `${now.getFullYear()}${pad2(now.getMonth() + 1)}${pad2(now.getDate())}`;
+
+    // 每天的流水號從 01 開始累計
+    if (!dailyCounter[dateKey]) dailyCounter[dateKey] = 0;
+    dailyCounter[dateKey]++;
+
+    const seq = pad2(dailyCounter[dateKey]); // 01, 02, ... 99
+    return `REC_${dateKey}_${seq}.mp4`;      // 例：REC_20250619_01.mp4
+  }
+
+  /* ── 計時器 ── */
+  function startTimer() {
+    seconds = 0;
+    clearInterval(timerInterval);
+    timerInterval = setInterval(() => {
+      seconds++;
+      const m = String(Math.floor(seconds / 60)).padStart(2, '0');
+      const s = String(seconds % 60).padStart(2, '0');
+      document.getElementById('timer').textContent = `${m}:${s}`;
+    }, 1000);
+  }
+
+  /* ── 記錄訊息 ── */
+  function log(msg) {
+    document.getElementById('log').innerHTML += `<br>→ ${msg}`;
+  }
+
+  /* ── 開始錄影 ── */
+  async function startRec() {
+    const height = parseInt(document.getElementById('resSelect').value);
+    const width  = height === 720 ? 1280 : 1920;
+    const useMic = document.getElementById('micSelect').value === 'true';
+
+    try {
+      // 請求使用者選擇螢幕來源（會彈出瀏覽器選擇框）
+      stream = await navigator.mediaDevices.getDisplayMedia({
+        video: { width, height, frameRate: 30 },
+        audio: true  // 擷取系統/分頁聲音
+      });
+
+      // 若需要麥克風，將麥克風音軌合併進去
+      if (useMic) {
+        const micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        micStream.getAudioTracks().forEach(track => stream.addTrack(track));
+      }
+
+      // 偵測瀏覽器支援的格式（優先用 mp4，若不支援則退回 webm）
+      const preferredTypes = [
+        'video/mp4',
+        'video/webm;codecs=h264',
+        'video/webm'
+      ];
+      const mimeType = preferredTypes.find(t => MediaRecorder.isTypeSupported(t)) || '';
+
+      // 建立錄影器
+      chunks = [];
+      mediaRecorder = new MediaRecorder(stream, mimeType ? { mimeType } : {});
+
+      // 每秒收集一塊資料（避免最後一次資料遺失）
+      mediaRecorder.ondataavailable = e => {
+        if (e.data.size > 0) chunks.push(e.data);
+      };
+
+      // 停止後自動存檔
+      mediaRecorder.onstop = saveFile;
+
+      mediaRecorder.start(1000);
+      startTimer();
+
+      document.getElementById('btnStart').disabled = true;
+      document.getElementById('btnStop').disabled  = false;
+      log(`錄影開始（${width}×${height}，格式：${mimeType || '預設'}）`);
+
+      // 使用者在瀏覽器端點「停止分享」時，自動呼叫 stopRec
+      stream.getVideoTracks()[0].onended = () => stopRec();
+
+    } catch (err) {
+      log('錯誤：' + err.message);
+    }
+  }
+
+  /* ── 停止錄影 ── */
+  function stopRec() {
+    if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+      mediaRecorder.stop();
+      stream.getTracks().forEach(t => t.stop());
+      clearInterval(timerInterval);
+      document.getElementById('btnStop').disabled = true;
+      log('停止錄影，正在打包...');
+    }
+  }
+
+  /* ── 存檔並觸發下載 ── */
+  function saveFile() {
+    const filename = getFilename();
+    const blob     = new Blob(chunks, { type: 'video/mp4' });
+    const url      = URL.createObjectURL(blob);
+
+    // 顯示預覽
+    const vid = document.getElementById('preview');
+    vid.src = url;
+
+    // 觸發瀏覽器下載
+    const a = document.createElement('a');
+    a.href     = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+
+    document.getElementById('btnStart').disabled = false;
+    log(`✅ 已下載：${filename}`);
+  }
+</script>
+</body>
+</html>
